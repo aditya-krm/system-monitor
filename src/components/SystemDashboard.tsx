@@ -2,11 +2,78 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
-import { RefreshCcw } from "lucide-react";
+import { RefreshCcw, Cpu, Server, HardDrive, Thermometer, Wifi, LineChart, Activity, List } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import CPULoadChart from "./CPULoadChart";
 import CPUCoreDetails from "./CPUCoreDetails";
+import ProcessTable from "./ProcessTable";
+import RaspberryPiInfo from "./RaspberryPiInfo";
+import NetworkTraffic from "./NetworkTraffic";
 import StatusIndicator from "./ui/status-indicator";
+import SystemServices from "./SystemServices";
 import { getCpuStatus, getMemoryStatus, getDiskStatus, getTemperatureStatus, getStatusLabel } from "@/lib/system-health";
+
+type GPIOStatus = {
+  pin: string;
+  mode: string;
+  value: string;
+};
+
+type NetworkInterfaceType = {
+  name: string;
+  mac: string;
+  ipv4: string;
+  ipv6: string;
+};
+
+type NetworkStatType = {
+  interface: string;
+  operstate: string;
+  rx_bytes: number;
+  rx_dropped: number;
+  rx_errors: number;
+  tx_bytes: number;
+  tx_dropped: number;
+  tx_errors: number;
+  rx_sec: number;
+  tx_sec: number;
+};
+
+type ProcessType = {
+  pid: number;
+  name: string;
+  cpu: number;
+  mem: number;
+  priority: number;
+  command: string;
+};
+
+type GraphicsControllerType = {
+  model: string;
+  vendor: string;
+  vram: number;
+  driverVersion: string;
+};
+
+type GraphicsDisplayType = {
+  model: string;
+  main: boolean;
+  builtin: boolean;
+  connection: string;
+  sizeX: number;
+  sizeY: number;
+  currentResX: number;
+  currentResY: number;
+};
+
+type RaspberryPiType = {
+  isRaspberryPi: boolean;
+  model?: string;
+  voltage?: string | null;
+  throttled?: string | null;
+  throttledHuman?: string[] | null;
+  gpioStatus?: GPIOStatus[];
+};
 
 type SystemInfoType = {
   cpu: {
@@ -49,22 +116,51 @@ type SystemInfoType = {
     max: number;
   };
   network: {
-    name: string;
-    mac: string;
-    ipv4: string;
-    ipv6: string;
-  }[];
+    interfaces: NetworkInterfaceType[];
+    stats: NetworkStatType[];
+  };
+  processes?: {
+    all: number;
+    running: number;
+    blocked: number;
+    sleeping: number;
+    list: ProcessType[];
+  };
+  graphics?: {
+    controllers: GraphicsControllerType[];
+    displays: GraphicsDisplayType[];
+  };
   battery: {
     hasBattery: boolean;
     isCharging?: boolean;
     percent?: number;
     timeRemaining?: number;
   };
+  raspberryPi?: RaspberryPiType;
+};
+
+// Service info type
+type ServiceInfoType = {
+  name: string;
+  status: string;
+  description?: string;
+  isRunning: boolean;
+};
+
+// Services response type
+type ServicesResponseType = {
+  services: ServiceInfoType[];
+  count: number;
+  runningCount: number;
 };
 
 export default function SystemDashboard() {
   const [systemInfo, setSystemInfo] = useState<SystemInfoType | null>(null);
+  const [services, setServices] = useState<ServicesResponseType | null>(null);
+  const [diskIO, setDiskIO] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [servicesLoading, setServicesLoading] = useState(true);
+  const [diskIOLoading, setDiskIOLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cpuHistory, setCpuHistory] = useState<Array<{time: string, load: number}>>([]);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
@@ -79,6 +175,34 @@ export default function SystemDashboard() {
       const data = await response.json();
       setSystemInfo(data);
       setLastRefresh(new Date());
+      
+      // Fetch services information
+      try {
+        setServicesLoading(true);
+        const servicesResponse = await fetch('/api/services');
+        if (servicesResponse.ok) {
+          const servicesData = await servicesResponse.json();
+          setServices(servicesData);
+        }
+      } catch (err) {
+        console.error('Error fetching services:', err);
+      } finally {
+        setServicesLoading(false);
+      }
+      
+      // Fetch disk I/O information
+      try {
+        setDiskIOLoading(true);
+        const diskIOResponse = await fetch('/api/disk-io');
+        if (diskIOResponse.ok) {
+          const diskIOData = await diskIOResponse.json();
+          setDiskIO(diskIOData);
+        }
+      } catch (err) {
+        console.error('Error fetching disk I/O:', err);
+      } finally {
+        setDiskIOLoading(false);
+      }
       
       // Add current CPU load to history
       if (data && data.cpu && data.cpu.load) {
@@ -356,8 +480,8 @@ export default function SystemDashboard() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {systemInfo.network.length > 0 ? (
-              systemInfo.network.map((iface, index) => (
+            {systemInfo.network.interfaces.length > 0 ? (
+              systemInfo.network.interfaces.map((iface, index) => (
                 <div key={index} className="border p-4 rounded-md">
                   <div className="flex items-center justify-between mb-3">
                     <h4 className="font-medium">{iface.name}</h4>
@@ -387,6 +511,11 @@ export default function SystemDashboard() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Network Traffic */}
+      {systemInfo.network.stats && systemInfo.network.stats.length > 0 && (
+        <NetworkTraffic networkStats={systemInfo.network.stats} />
+      )}
 
       {/* Battery */}
       <Card>
@@ -419,6 +548,31 @@ export default function SystemDashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* Process Table */}
+      {systemInfo.processes && systemInfo.processes.list && (
+        <ProcessTable 
+          processes={systemInfo.processes.list} 
+          onRefresh={fetchSystemInfo}
+          loading={loading} 
+        />
+      )}
+
+      {/* Raspberry Pi Information */}
+      {systemInfo.raspberryPi && systemInfo.raspberryPi.isRaspberryPi && (
+        <RaspberryPiInfo data={systemInfo.raspberryPi} />
+      )}
+
+      {/* System Services */}
+      {services && (
+        <SystemServices
+          services={services.services}
+          count={services.count}
+          runningCount={services.runningCount}
+          onRefresh={fetchSystemInfo}
+          loading={servicesLoading}
+        />
+      )}
 
       {/* Footer information */}
       <footer className="mt-8 pt-6 border-t border-border text-center text-sm text-muted-foreground">
